@@ -1,15 +1,16 @@
 # ============================================================
-#  Phoenix-SAKHI — FastAPI Backend v2.0
-#  New: POST /alerts/{id}/audio  — upload recorded audio
-#  New: GET  /alerts/{id}/audio  — get audio URL
+#  Phoenix-SAKHI — FastAPI Backend v2.0 (Fixed)
 # ============================================================
 
-import os, uuid, time
+import os
+import uuid
+import time
 from datetime import datetime, timezone
+from typing import Optional
+
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
@@ -25,12 +26,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Supabase client ───────────────────────────────────────
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+# ── Supabase ──────────────────────────────────────────────
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise RuntimeError("SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY env var missing!")
+
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ── Pydantic models ───────────────────────────────────────
+# ── Models ────────────────────────────────────────────────
 class UserModel(BaseModel):
     user_id:           str
     name:              str
@@ -49,19 +54,19 @@ class AlertModel(BaseModel):
 class ResolveModel(BaseModel):
     notes: Optional[str] = ""
 
-# ─────────────────────────────────────────────────────────
+# ── Health check ──────────────────────────────────────────
 @app.get("/")
 def root():
-    return {"message": "Phoenix-SAKHI API v2.0 ✅", "status": "running",
-            "endpoints": ["/register", "/users", "/alert", "/alerts",
-                          "/alerts/{id}", "/alerts/{id}/resolve",
-                          "/alerts/{id}/audio", "/stats"]}
+    return {
+        "message": "Phoenix-SAKHI API v2.0 running ✅",
+        "status":  "online"
+    }
 
-# ── User registration ─────────────────────────────────────
+# ── Register user ─────────────────────────────────────────
 @app.post("/register")
 def register_user(user: UserModel):
     try:
-        res = supabase.table("users").upsert({
+        supabase.table("users").upsert({
             "user_id":           user.user_id,
             "name":              user.name,
             "phone":             user.phone,
@@ -70,9 +75,9 @@ def register_user(user: UserModel):
             "address":           user.address,
             "photo_url":         user.photo_url,
         }).execute()
-        return {"status": "User registered", "user_id": user.user_id}
+        return {"status": "registered", "user_id": user.user_id}
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ── Get all users ─────────────────────────────────────────
 @app.get("/users")
@@ -81,16 +86,16 @@ def get_users():
         res = supabase.table("users").select("*").execute()
         return res.data or []
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
-# ── Create SOS alert ─────────────────────────────────────
+# ── Create alert ──────────────────────────────────────────
 @app.post("/alert")
 def create_alert(alert: AlertModel):
     if alert.alert_type not in ["SOS_BUTTON", "SOS_FALL"]:
-        raise HTTPException(400, "alert_type must be SOS_BUTTON or SOS_FALL")
+        raise HTTPException(status_code=400, detail="Invalid alert_type")
     try:
         alert_id = str(uuid.uuid4())
-        res = supabase.table("alerts").insert({
+        supabase.table("alerts").insert({
             "id":         alert_id,
             "user_id":    alert.user_id,
             "alert_type": alert.alert_type,
@@ -101,15 +106,16 @@ def create_alert(alert: AlertModel):
         }).execute()
         return {"status": "Alert created", "alert_id": alert_id}
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ── Get all alerts ────────────────────────────────────────
 @app.get("/alerts")
 def get_alerts():
     try:
-        res = supabase.table("alerts")\
-            .select("*, users(name,phone,emergency_contact,emergency_phone,address)")\
-            .order("timestamp", desc=True).execute()
+        res = supabase.table("alerts") \
+            .select("*, users(name, phone, emergency_contact, emergency_phone, address)") \
+            .order("timestamp", desc=True) \
+            .execute()
         alerts = []
         for row in (res.data or []):
             flat = dict(row)
@@ -118,21 +124,21 @@ def get_alerts():
             alerts.append(flat)
         return alerts
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ── Get single alert ──────────────────────────────────────
 @app.get("/alerts/{alert_id}")
 def get_alert(alert_id: str):
     try:
-        res = supabase.table("alerts")\
-            .select("*, users(name,phone,emergency_contact,emergency_phone,address)")\
+        res = supabase.table("alerts") \
+            .select("*, users(name, phone, emergency_contact, emergency_phone, address)") \
             .eq("id", alert_id).single().execute()
         flat = dict(res.data)
         if flat.get("users"):
             flat.update(flat.pop("users"))
         return flat
     except Exception as e:
-        raise HTTPException(404, f"Alert not found: {e}")
+        raise HTTPException(status_code=404, detail=str(e))
 
 # ── Resolve alert ─────────────────────────────────────────
 @app.put("/alerts/{alert_id}/resolve")
@@ -142,36 +148,32 @@ def resolve_alert(alert_id: str, body: ResolveModel):
             "status": "resolved",
             "notes":  body.notes
         }).eq("id", alert_id).execute()
-        return {"status": "Alert resolved", "alert_id": alert_id}
+        return {"status": "resolved", "alert_id": alert_id}
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ── Delete alert ──────────────────────────────────────────
 @app.delete("/alerts/{alert_id}")
 def delete_alert(alert_id: str):
     try:
         supabase.table("alerts").delete().eq("id", alert_id).execute()
-        return {"status": "Alert deleted", "alert_id": alert_id}
+        return {"status": "deleted", "alert_id": alert_id}
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
-# ── AUDIO UPLOAD ──────────────────────────────────────────
+# ── Upload audio for an alert ─────────────────────────────
 @app.post("/alerts/{alert_id}/audio")
 async def upload_audio(alert_id: str, audio: UploadFile = File(...)):
-    """
-    Receives audio recording from Android app,
-    stores in Supabase Storage bucket 'recordings',
-    updates alert row with audio_url.
-    """
     try:
+        # Read file bytes
         audio_bytes = await audio.read()
         if not audio_bytes:
-            raise HTTPException(400, "Empty audio file")
+            raise HTTPException(status_code=400, detail="Empty audio file")
 
         filename = f"{alert_id}_{int(time.time())}.aac"
 
         # Upload to Supabase Storage bucket "recordings"
-        upload_res = supabase.storage.from_("recordings").upload(
+        supabase.storage.from_("recordings").upload(
             filename,
             audio_bytes,
             {"content-type": "audio/aac", "upsert": "true"}
@@ -180,62 +182,66 @@ async def upload_audio(alert_id: str, audio: UploadFile = File(...)):
         # Get public URL
         public_url = supabase.storage.from_("recordings").get_public_url(filename)
 
-        # Update alert with audio_url
-        supabase.table("alerts").update({
-            "audio_url": public_url
-        }).eq("id", alert_id).execute()
+        # Save URL to alert row
+        supabase.table("alerts").update(
+            {"audio_url": public_url}
+        ).eq("id", alert_id).execute()
 
         return {
             "status":    "Audio uploaded",
             "alert_id":  alert_id,
-            "audio_url": public_url,
-            "filename":  filename
+            "audio_url": public_url
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(500, f"Audio upload failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Audio upload error: {str(e)}")
 
-# ── GET audio URL for an alert ────────────────────────────
-@app.get("/alerts/{alert_id}/audio")
-def get_audio(alert_id: str):
-    try:
-        res = supabase.table("alerts")\
-            .select("audio_url").eq("id", alert_id).single().execute()
-        audio_url = res.data.get("audio_url")
-        if not audio_url:
-            raise HTTPException(404, "No audio for this alert")
-        return {"alert_id": alert_id, "audio_url": audio_url}
-    except Exception as e:
-        raise HTTPException(404, str(e))
-
-# ── Standalone audio upload (no alert_id) ─────────────────
+# ── Standalone audio upload (no alert id yet) ─────────────
 @app.post("/audio/upload")
 async def upload_audio_standalone(audio: UploadFile = File(...)):
-    """Fallback when alert_id is unknown at time of upload."""
     try:
         audio_bytes = await audio.read()
-        filename = f"standalone_{int(time.time())}.aac"
+        filename    = f"standalone_{int(time.time())}.aac"
         supabase.storage.from_("recordings").upload(
-            filename, audio_bytes,
+            filename,
+            audio_bytes,
             {"content-type": "audio/aac", "upsert": "true"}
         )
         public_url = supabase.storage.from_("recordings").get_public_url(filename)
         return {"status": "Uploaded", "audio_url": public_url}
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ── Get audio URL for an alert ────────────────────────────
+@app.get("/alerts/{alert_id}/audio")
+def get_audio(alert_id: str):
+    try:
+        res = supabase.table("alerts") \
+            .select("audio_url").eq("id", alert_id).single().execute()
+        audio_url = (res.data or {}).get("audio_url")
+        if not audio_url:
+            raise HTTPException(status_code=404, detail="No audio for this alert")
+        return {"alert_id": alert_id, "audio_url": audio_url}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 # ── Stats ─────────────────────────────────────────────────
 @app.get("/stats")
 def get_stats():
     try:
-        alerts = supabase.table("alerts").select("status,alert_type").execute().data or []
+        alerts = supabase.table("alerts").select("status, alert_type, audio_url").execute().data or []
         users  = supabase.table("users").select("user_id", count="exact").execute()
         return {
-            "total":    len(alerts),
-            "active":   sum(1 for a in alerts if a["status"] == "active"),
-            "resolved": sum(1 for a in alerts if a["status"] == "resolved"),
-            "sos_button": sum(1 for a in alerts if a["alert_type"] == "SOS_BUTTON"),
-            "sos_fall":   sum(1 for a in alerts if a["alert_type"] == "SOS_FALL"),
-            "users":    users.count or 0,
+            "total":      len(alerts),
+            "active":     sum(1 for a in alerts if a.get("status")     == "active"),
+            "resolved":   sum(1 for a in alerts if a.get("status")     == "resolved"),
+            "sos_button": sum(1 for a in alerts if a.get("alert_type") == "SOS_BUTTON"),
+            "sos_fall":   sum(1 for a in alerts if a.get("alert_type") == "SOS_FALL"),
+            "with_audio": sum(1 for a in alerts if a.get("audio_url")),
+            "users":      users.count or 0,
         }
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise HTTPException(status_code=500, detail=str(e))
